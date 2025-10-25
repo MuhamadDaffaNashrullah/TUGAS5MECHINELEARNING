@@ -28,7 +28,13 @@ FEATURES = [
 ]
 
 # Load model and metrics
-model = joblib.load(MODEL_PATH)
+try:
+    model = joblib.load(MODEL_PATH)
+    print(f"[INFO] Model loaded successfully from {MODEL_PATH}")
+except Exception as e:
+    print(f"[ERROR] Failed to load model: {e}")
+    model = None
+
 calibrated_isotonic = None
 calibrated_sigmoid = None
 try:
@@ -257,6 +263,22 @@ def index():
     decision_details = None
     selected_calibration = 'isotonic'
     threshold = 0.5
+    
+    # Check if model is loaded
+    if model is None:
+        return render_template('index.html', 
+                              features=FEATURES,
+                              defaults={},
+                              prediction_text="Model tidak tersedia. Silakan coba lagi nanti.",
+                              risk_prob=None,
+                              is_risky=None,
+                              accuracy=None,
+                              plot_urls=[],
+                              presets={},
+                              decision_details=None,
+                              selected_calibration=selected_calibration,
+                              threshold=threshold,
+                              error=True)
 
     # default values for convenience
     defaults = {
