@@ -27,9 +27,8 @@ FEATURES = [
     'thalach', 'exang', 'oldpeak', 'slope', 'ca', 'thal'
 ]
 
-# Initialize model as None - will be loaded on first use
-model = None
-
+# Load model and metrics
+model = joblib.load(MODEL_PATH)
 calibrated_isotonic = None
 calibrated_sigmoid = None
 try:
@@ -59,92 +58,18 @@ os.makedirs(PLOTS_DIR, exist_ok=True)
 
 app = Flask(__name__)
 
-def load_model():
-    """Load the model if not already loaded."""
-    global model
-    if model is None:
-        print(f"[DEBUG] Loading model from: {MODEL_PATH}")
-        print(f"[DEBUG] Model file exists: {os.path.exists(MODEL_PATH)}")
-        print(f"[DEBUG] Current working directory: {os.getcwd()}")
-        
-        try:
-            model = joblib.load(MODEL_PATH)
-            print(f"[INFO] Model loaded successfully from {MODEL_PATH}")
-        except Exception as e:
-            print(f"[ERROR] Failed to load model: {e}")
-            print(f"[ERROR] Model path: {MODEL_PATH}")
-            print(f"[ERROR] Absolute path: {os.path.abspath(MODEL_PATH)}")
-            model = None
-    return model
-
-@app.route('/health')
-def health_check():
-    """Health check endpoint for deployment debugging."""
-    # Try to load model
-    current_model = load_model()
-    
-    status = {
-        'status': 'ok',
-        'model_loaded': current_model is not None,
-        'model_path': MODEL_PATH,
-        'model_exists': os.path.exists(MODEL_PATH),
-        'plots_dir': PLOTS_DIR,
-        'plots_dir_exists': os.path.exists(PLOTS_DIR),
-        'plots_count': len(get_plot_urls()),
-        'working_directory': os.getcwd(),
-        'files_in_dir': os.listdir('.') if os.path.exists('.') else []
-    }
-    return status
-
-@app.route('/static/plots/<filename>')
-def serve_plot(filename):
-    """Serve plot files directly."""
-    from flask import send_from_directory, abort
-    try:
-        return send_from_directory(PLOTS_DIR, filename)
-    except FileNotFoundError:
-        print(f"[ERROR] Plot file not found: {filename}")
-        abort(404)
-
-@app.route('/static/<path:filename>')
-def serve_static(filename):
-    """Serve static files."""
-    from flask import send_from_directory, abort
-    try:
-        return send_from_directory(STATIC_DIR, filename)
-    except FileNotFoundError:
-        print(f"[ERROR] Static file not found: {filename}")
-        abort(404)
-
 
 def get_plot_urls():
     exts = {'.png', '.jpg', '.jpeg'}
-    print(f"[DEBUG] Looking for plots in: {PLOTS_DIR}")
-    print(f"[DEBUG] Plots directory exists: {os.path.exists(PLOTS_DIR)}")
-    
-    if not os.path.exists(PLOTS_DIR):
-        print(f"[WARNING] Plots directory does not exist: {PLOTS_DIR}")
+    if not os.path.isdir(PLOTS_DIR):
         return []
-    
-    try:
-        files = os.listdir(PLOTS_DIR)
-        print(f"[DEBUG] Files in plots directory: {files}")
-    except Exception as e:
-        print(f"[ERROR] Cannot list plots directory: {e}")
-        return []
-    
     exclude = {'roc_curve.png', 'feature_importance.png', 'confusion_matrix.png'}
-    plot_files = [
-        f for f in files
+    files = [
+        f for f in os.listdir(PLOTS_DIR)
         if os.path.splitext(f)[1].lower() in exts and f not in exclude
     ]
-    plot_files.sort()
-    print(f"[DEBUG] Found plot files: {plot_files}")
-    
-    # Generate URLs without using url_for to avoid context issues
-    urls = [f'/static/plots/{f}' for f in plot_files]
-    print(f"[DEBUG] Generated URLs: {urls}")
-    return urls
+    files.sort()
+    return [url_for('static', filename=f'plots/{f}') for f in files]
 
 
 def _load_eval_data():
@@ -200,44 +125,32 @@ def _plot_roc(model, X_test, y_test):
 
 
 def generate_plots_if_missing():
-    # Check if we have any plots, if not, generate them
-    plot_urls = get_plot_urls()
-    if len(plot_urls) == 0:
-        print("[INFO] No plots found, generating evaluation plots...")
+    # Hanya buat metrics.json bila belum ada; tidak membuat file gambar apa pun
+    if os.path.exists(METRICS_PATH):
+        return
+    try:
+        df = _load_eval_data()
+        X = df[FEATURES]
+        y = df['target']
+        # gunakan split agar metrik realistis
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+        y_pred = model.predict(X_test)
+        acc = float(accuracy_score(y_test, y_pred))
+        roc_auc = None
         try:
-            current_model = load_model()
-            if current_model is None:
-                print("[ERROR] Cannot generate plots - model not available")
-                return
-                
-            df = _load_eval_data()
-            X = df[FEATURES]
-            y = df['target']
-            # gunakan split agar metrik realistis
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-            y_pred = current_model.predict(X_test)
-            acc = float(accuracy_score(y_test, y_pred))
-            roc_auc = None
-            try:
-                if hasattr(current_model, 'predict_proba'):
-                    y_proba = current_model.predict_proba(X_test)[:, 1]
-                    roc_auc = float(roc_auc_score(y_test, y_proba))
-            except Exception:
-                pass
+            if hasattr(model, 'predict_proba'):
+                y_proba = model.predict_proba(X_test)[:, 1]
+                roc_auc = float(roc_auc_score(y_test, y_proba))
+        except Exception:
+            pass
 
-            # Generate plots
-            _plot_feature_importance(current_model, X)
-            _plot_confusion_matrix(y_test, y_pred)
-            _plot_roc(current_model, X_test, y_test)
+        # Tidak membuat plot apapun sesuai permintaan
 
-            with open(METRICS_PATH, 'w', encoding='utf-8') as f:
-                json.dump({'accuracy': acc, 'roc_auc': roc_auc}, f, ensure_ascii=False, indent=2)
-            metrics.update({'accuracy': acc, 'roc_auc': roc_auc})
-            print("[INFO] Plots generated successfully")
-        except Exception as e:
-            print('[ERROR] Failed to generate plots:', e)
-    else:
-        print(f"[INFO] Found {len(plot_urls)} existing plots")
+        with open(METRICS_PATH, 'w', encoding='utf-8') as f:
+            json.dump({'accuracy': acc, 'roc_auc': roc_auc}, f, ensure_ascii=False, indent=2)
+        metrics.update({'accuracy': acc, 'roc_auc': roc_auc})
+    except Exception as e:
+        print('[plots] gagal membuat grafik:', e)
 
 def _synthetic_data(n=400, random_state=42):
     rng = np.random.RandomState(random_state)
@@ -344,23 +257,6 @@ def index():
     decision_details = None
     selected_calibration = 'isotonic'
     threshold = 0.5
-    
-    # Load model if needed
-    current_model = load_model()
-    if current_model is None:
-        return render_template('index.html', 
-                              features=FEATURES,
-                              defaults={},
-                              prediction_text="Model tidak tersedia. Silakan coba lagi nanti.",
-                              risk_prob=None,
-                              is_risky=None,
-                              accuracy=None,
-                              plot_urls=[],
-                              presets={},
-                              decision_details=None,
-                              selected_calibration=selected_calibration,
-                              threshold=threshold,
-                              error=True)
 
     # default values for convenience
     defaults = {
@@ -397,10 +293,10 @@ def index():
                 proba = calibrated_isotonic.predict_proba(X)[0][1]
             elif selected_calibration == 'sigmoid' and calibrated_sigmoid is not None:
                 proba = calibrated_sigmoid.predict_proba(X)[0][1]
-            elif hasattr(current_model, 'predict_proba'):
-                proba = current_model.predict_proba(X)[0][1]
+            elif hasattr(model, 'predict_proba'):
+                proba = model.predict_proba(X)[0][1]
             else:
-                proba = float(current_model.predict(X)[0])
+                proba = float(model.predict(X)[0])
             risk_prob = float(proba)
             is_risky = risk_prob >= threshold
 
@@ -411,7 +307,7 @@ def index():
 
             # Keep submitted values in the form
             defaults.update({feat: request.form.get(feat) for feat in FEATURES})
-            decision_details = explain_tree_decision(current_model, FEATURES, X)
+            decision_details = explain_tree_decision(model, FEATURES, X)
         except Exception:
             prediction_text = 'Input tidak valid. Periksa kembali nilai fitur Anda.'
 
@@ -419,7 +315,7 @@ def index():
     plot_urls = get_plot_urls()
     accuracy = metrics.get('accuracy')
     try:
-        presets = build_presets(current_model)
+        presets = build_presets(model)
     except Exception:
         presets = {}
 
