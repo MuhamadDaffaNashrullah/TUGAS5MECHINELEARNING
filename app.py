@@ -28,11 +28,18 @@ FEATURES = [
 ]
 
 # Load model and metrics
+print(f"[DEBUG] Looking for model at: {MODEL_PATH}")
+print(f"[DEBUG] Model file exists: {os.path.exists(MODEL_PATH)}")
+print(f"[DEBUG] Current working directory: {os.getcwd()}")
+print(f"[DEBUG] Files in current directory: {os.listdir('.')}")
+
 try:
     model = joblib.load(MODEL_PATH)
     print(f"[INFO] Model loaded successfully from {MODEL_PATH}")
 except Exception as e:
     print(f"[ERROR] Failed to load model: {e}")
+    print(f"[ERROR] Model path: {MODEL_PATH}")
+    print(f"[ERROR] Absolute path: {os.path.abspath(MODEL_PATH)}")
     model = None
 
 calibrated_isotonic = None
@@ -64,18 +71,57 @@ os.makedirs(PLOTS_DIR, exist_ok=True)
 
 app = Flask(__name__)
 
+@app.route('/health')
+def health_check():
+    """Health check endpoint for deployment debugging."""
+    status = {
+        'status': 'ok',
+        'model_loaded': model is not None,
+        'model_path': MODEL_PATH,
+        'model_exists': os.path.exists(MODEL_PATH),
+        'plots_dir': PLOTS_DIR,
+        'plots_dir_exists': os.path.exists(PLOTS_DIR),
+        'plots_count': len(get_plot_urls()),
+        'working_directory': os.getcwd(),
+        'files_in_dir': os.listdir('.') if os.path.exists('.') else []
+    }
+    return status
+
+@app.route('/static/plots/<filename>')
+def serve_plot(filename):
+    """Serve plot files directly."""
+    from flask import send_from_directory
+    return send_from_directory(PLOTS_DIR, filename)
+
 
 def get_plot_urls():
     exts = {'.png', '.jpg', '.jpeg'}
-    if not os.path.isdir(PLOTS_DIR):
+    print(f"[DEBUG] Looking for plots in: {PLOTS_DIR}")
+    print(f"[DEBUG] Plots directory exists: {os.path.exists(PLOTS_DIR)}")
+    
+    if not os.path.exists(PLOTS_DIR):
+        print(f"[WARNING] Plots directory does not exist: {PLOTS_DIR}")
         return []
+    
+    try:
+        files = os.listdir(PLOTS_DIR)
+        print(f"[DEBUG] Files in plots directory: {files}")
+    except Exception as e:
+        print(f"[ERROR] Cannot list plots directory: {e}")
+        return []
+    
     exclude = {'roc_curve.png', 'feature_importance.png', 'confusion_matrix.png'}
-    files = [
-        f for f in os.listdir(PLOTS_DIR)
+    plot_files = [
+        f for f in files
         if os.path.splitext(f)[1].lower() in exts and f not in exclude
     ]
-    files.sort()
-    return [url_for('static', filename=f'plots/{f}') for f in files]
+    plot_files.sort()
+    print(f"[DEBUG] Found plot files: {plot_files}")
+    
+    # Generate URLs without using url_for to avoid context issues
+    urls = [f'/static/plots/{f}' for f in plot_files]
+    print(f"[DEBUG] Generated URLs: {urls}")
+    return urls
 
 
 def _load_eval_data():
@@ -131,32 +177,39 @@ def _plot_roc(model, X_test, y_test):
 
 
 def generate_plots_if_missing():
-    # Hanya buat metrics.json bila belum ada; tidak membuat file gambar apa pun
-    if os.path.exists(METRICS_PATH):
-        return
-    try:
-        df = _load_eval_data()
-        X = df[FEATURES]
-        y = df['target']
-        # gunakan split agar metrik realistis
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-        y_pred = model.predict(X_test)
-        acc = float(accuracy_score(y_test, y_pred))
-        roc_auc = None
+    # Check if we have any plots, if not, generate them
+    plot_urls = get_plot_urls()
+    if len(plot_urls) == 0:
+        print("[INFO] No plots found, generating evaluation plots...")
         try:
-            if hasattr(model, 'predict_proba'):
-                y_proba = model.predict_proba(X_test)[:, 1]
-                roc_auc = float(roc_auc_score(y_test, y_proba))
-        except Exception:
-            pass
+            df = _load_eval_data()
+            X = df[FEATURES]
+            y = df['target']
+            # gunakan split agar metrik realistis
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+            y_pred = model.predict(X_test)
+            acc = float(accuracy_score(y_test, y_pred))
+            roc_auc = None
+            try:
+                if hasattr(model, 'predict_proba'):
+                    y_proba = model.predict_proba(X_test)[:, 1]
+                    roc_auc = float(roc_auc_score(y_test, y_proba))
+            except Exception:
+                pass
 
-        # Tidak membuat plot apapun sesuai permintaan
+            # Generate plots
+            _plot_feature_importance(model, X)
+            _plot_confusion_matrix(y_test, y_pred)
+            _plot_roc(model, X_test, y_test)
 
-        with open(METRICS_PATH, 'w', encoding='utf-8') as f:
-            json.dump({'accuracy': acc, 'roc_auc': roc_auc}, f, ensure_ascii=False, indent=2)
-        metrics.update({'accuracy': acc, 'roc_auc': roc_auc})
-    except Exception as e:
-        print('[plots] gagal membuat grafik:', e)
+            with open(METRICS_PATH, 'w', encoding='utf-8') as f:
+                json.dump({'accuracy': acc, 'roc_auc': roc_auc}, f, ensure_ascii=False, indent=2)
+            metrics.update({'accuracy': acc, 'roc_auc': roc_auc})
+            print("[INFO] Plots generated successfully")
+        except Exception as e:
+            print('[ERROR] Failed to generate plots:', e)
+    else:
+        print(f"[INFO] Found {len(plot_urls)} existing plots")
 
 def _synthetic_data(n=400, random_state=42):
     rng = np.random.RandomState(random_state)
